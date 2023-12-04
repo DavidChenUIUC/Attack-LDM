@@ -20,7 +20,7 @@ from ldm.modules.diffusionmodules.util import (
 from ldm.modules.attention import SpatialTransformer
 from ldm.util import exists
 
-
+device = th.device("cuda" if th.cuda.is_available() else "cpu")
 # dummy replace
 def convert_module_to_f16(x):
     pass
@@ -307,11 +307,12 @@ class AttentionBlock(nn.Module):
             # split qkv before split heads
             self.attention = QKVAttention(self.num_heads)
         else:
+            # print("|- Using legacy attention order")
             # split heads before split qkv
             self.attention = QKVAttentionLegacy(self.num_heads)
 
         self.proj_out = zero_module(conv_nd(1, channels, channels, 1))
-
+        
     def forward(self, x):
         return checkpoint(self._forward, (x,), self.parameters(), True)   # TODO: check checkpoint usage, is True # TODO: fix the .half call!!!
         #return pt_checkpoint(self._forward, x)  # pytorch
@@ -322,7 +323,10 @@ class AttentionBlock(nn.Module):
         qkv = self.qkv(self.norm(x))
         h = self.attention(qkv)
         h = self.proj_out(h)
-        return (x + h).reshape(b, c, *spatial)
+        out =  (x + h).reshape(b, c, *spatial)
+        
+        print(f"|- AttentionBlock: x.shape {x.shape}, h.shape {h.shape}, out.shape {out.shape}")
+        return out
 
 
 def count_flops_attn(model, _x, y):
@@ -364,6 +368,15 @@ class QKVAttentionLegacy(nn.Module):
         assert width % (3 * self.n_heads) == 0
         ch = width // (3 * self.n_heads)
         q, k, v = qkv.reshape(bs * self.n_heads, ch * 3, length).split(ch, dim=1)
+        
+        # print("|- QKVAttentionLegacy: q.shape", q.shape)
+        # print("|- QKVAttentionLegacy: k.shape", k.shape)
+        # print("|- QKVAttentionLegacy: v.shape", v.shape)
+        # ## See if k == v and q!=k and q!=v
+        # print("|- QKVAttentionLegacy: k==v", (k==v).all())
+        # print("|- QKVAttentionLegacy: q==k", (q==k).all())
+        # print("|- QKVAttentionLegacy: q==v", (q==v).all())
+
         scale = 1 / math.sqrt(math.sqrt(ch))
         weight = th.einsum(
             "bct,bcs->bts", q * scale, k * scale
@@ -396,6 +409,13 @@ class QKVAttention(nn.Module):
         assert width % (3 * self.n_heads) == 0
         ch = width // (3 * self.n_heads)
         q, k, v = qkv.chunk(3, dim=1)
+        # print("|- QKVAttention: q.shape", q.shape)
+        # print("|- QKVAttention: k.shape", k.shape)
+        # print("|- QKVAttention: v.shape", v.shape)
+        # ## See if k == v and q!=k and q!=v
+        # print("|- QKVAttention: k==v", (k==v).all())
+        # print("|- QKVAttention: q==k", (q==k).all())
+        # print("|- QKVAttention: q==v", (q==v).all())
         scale = 1 / math.sqrt(math.sqrt(ch))
         weight = th.einsum(
             "bct,bcs->bts",
@@ -511,7 +531,7 @@ class UNetModel(nn.Module):
                   f"This option has LESS priority than attention_resolutions {attention_resolutions}, "
                   f"i.e., in cases where num_attention_blocks[i] > 0 but 2**i not in attention_resolutions, "
                   f"attention will still not be set.")  # todo: convert to warning
-
+        print("|- THE UNET MODEL THAT IS BEING USED")
         self.attention_resolutions = attention_resolutions
         self.dropout = dropout
         self.channel_mult = channel_mult
@@ -755,9 +775,9 @@ class UNetModel(nn.Module):
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"
         hs = []
+        print("|- Forwarding in UNET MODEL")
         t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
         emb = self.time_embed(t_emb)
-
         if self.num_classes is not None:
             assert y.shape == (x.shape[0],)
             emb = emb + self.label_emb(y)

@@ -1,0 +1,10 @@
+
+*.pth
+*.pt
+*.h5
+*.jpg
+latent-diffusion/
+deepface/
+*=1.0.8*
+*=2.0.0*
+logs/

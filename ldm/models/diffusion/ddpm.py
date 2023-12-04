@@ -17,7 +17,7 @@ from functools import partial
 import itertools
 from tqdm import tqdm
 from torchvision.utils import make_grid
-from pytorch_lightning.utilities.distributed import rank_zero_only
+from pytorch_lightning.utilities.rank_zero import rank_zero_only
 from omegaconf import ListConfig
 
 from ldm.util import log_txt_as_img, exists, default, ismap, isimage, mean_flat, count_params, instantiate_from_config
@@ -189,7 +189,7 @@ class DDPM(pl.LightningModule):
             if self.use_ema:
                 self.model_ema.restore(self.model.parameters())
                 if context is not None:
-                    print(f"{context}: Restored training weights")
+                    print(f"{context}:++ Restored training weights")
 
     @torch.no_grad()
     def init_from_ckpt(self, path, ignore_keys=list(), only_model=False):
@@ -715,6 +715,7 @@ class LatentDiffusion(DDPM):
     @torch.no_grad()
     def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
                   cond_key=None, return_original_cond=False, bs=None, return_x=False):
+        print("|- Getting from Latent Diffusionn class")
         x = super().get_input(batch, k)
         if bs is not None:
             x = x[:bs]
@@ -892,7 +893,7 @@ class LatentDiffusion(DDPM):
         return [rescale_bbox(b) for b in bboxes]
 
     def apply_model(self, x_noisy, t, cond, return_ids=False):
-
+        print("|- ldm/models: Latent Diffusionn class: apply_model")
         if isinstance(cond, dict):
             # hybrid case, cond is exptected to be a dict
             pass
@@ -900,9 +901,11 @@ class LatentDiffusion(DDPM):
             if not isinstance(cond, list):
                 cond = [cond]
             key = 'c_concat' if self.model.conditioning_key == 'concat' else 'c_crossattn'
-            cond = {key: cond}
+            print("|- ldm/models: Latent Diffusionn class: apply_model: set up key: ", key)
+            cond = {key: cond} ##here
 
         if hasattr(self, "split_input_params"):
+            print("|- ldm/models: Latent Diffusionn class: apply_model: split_input_params")
             assert len(cond) == 1  # todo can only deal with one conditioning atm
             assert not return_ids  
             ks = self.split_input_params["ks"]  # eg. (128, 128)
@@ -919,6 +922,7 @@ class LatentDiffusion(DDPM):
 
             if self.cond_stage_key in ["image", "LR_image", "segmentation",
                                        'bbox_img'] and self.model.conditioning_key:  # todo check for completeness
+                print("|- ldm/models: Latent Diffusionn class: apply_model: split_input_params: ", self.cond_stage_key )
                 c_key = next(iter(cond.keys()))  # get key
                 c = next(iter(cond.values()))  # get value
                 assert (len(c) == 1)  # todo extend to list with more than one elem
@@ -930,6 +934,7 @@ class LatentDiffusion(DDPM):
                 cond_list = [{c_key: [c[:, :, :, :, i]]} for i in range(c.shape[-1])]
 
             elif self.cond_stage_key == 'coordinates_bbox':
+                # print("|- ldm/models: Latent Diffusionn class: apply_model: split_input_params: coordinates_bbox")
                 assert 'original_image_size' in self.split_input_params, 'BoudingBoxRescaling is missing original_image_size'
 
                 # assuming padding of unfold is always 0 and its dilation is always 1
@@ -969,12 +974,18 @@ class LatentDiffusion(DDPM):
                 adapted_cond = rearrange(adapted_cond, '(l b) n d -> l b n d', l=z.shape[-1])
                 print(adapted_cond.shape)
 
-                cond_list = [{'c_crossattn': [e]} for e in adapted_cond]
+                cond_list = [{'c_crossattn': [e]} for e in adapted_cond] ## Cross Attention!!!!
 
             else:
+
                 cond_list = [cond for i in range(z.shape[-1])]  # Todo make this more efficient
 
             # apply model by loop over crops
+            print("|- ldm/models: Latent Diffusionn class: apply_model: model name: ", self.model.__class__.__name__)
+            '''
+            Note that here model takes "self.model(z_list[i], t, **cond_list[i]) as input" for each crop
+            where the model is "DiffusionWrapper"
+            '''
             output_list = [self.model(z_list[i], t, **cond_list[i]) for i in range(z.shape[-1])]
             assert not isinstance(output_list[0],
                                   tuple)  # todo cant deal with multiple model outputs check this never happens
@@ -985,6 +996,8 @@ class LatentDiffusion(DDPM):
             o = o.view((o.shape[0], -1, o.shape[-1]))  # (bn, nc * ks[0] * ks[1], L)
             # stitch crops together
             x_recon = fold(o) / normalization
+            print("|- ldm/models: Latent Diffusionn class: apply_model: split_input_params: return x_recon")
+            print("|- x_recon.shape: ", x_recon.shape)
 
         else:
             x_recon = self.model(x_noisy, t, **cond)
@@ -1436,9 +1449,18 @@ class DiffusionWrapper(pl.LightningModule):
         assert self.conditioning_key in [None, 'concat', 'crossattn', 'hybrid', 'adm', 'hybrid-adm']
 
     def forward(self, x, t, c_concat: list = None, c_crossattn: list = None, c_adm=None):
+        print("|- ldm/models: DiffusionWrapper class: forward: self.conditioning_key: ", self.conditioning_key)
+        print("|- ldm/models: DiffusionWrapper class: diffuision_model: ", self.diffusion_model.__class__.__name__)
         if self.conditioning_key is None:
             out = self.diffusion_model(x, t)
         elif self.conditioning_key == 'concat':
+            #Note that it is doing concatination, instead of element-wise addition
+            #print shapes
+            # print("|- DiffusionWrapper class: forward: length of c_concat: ", len(c_concat))
+            # print("|- DiffusionWrapper class: forward: c_concat: ", c_concat[0].shape)
+            # print("|- DiffusionWrapper class: forward: x: ", x.shape)
+            # print("|- c_concet[0] value: ", c_concat[0])
+            # print("|- x value: ", x)
             xc = torch.cat([x] + c_concat, dim=1)
             out = self.diffusion_model(xc, t)
         elif self.conditioning_key == 'crossattn':
