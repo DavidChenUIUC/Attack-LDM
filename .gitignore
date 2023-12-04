@@ -1,0 +1,10 @@
+*.pth
+*.pt
+*.h5
+*.jpg
+*=1.0.8*
+*=2.0.0*
+logs/*
+*.ckpt*
+logs/diffusion/superresolution_bsr/checkpoints/last.ckpt/?dl=1
+*logs/diffusion/superresolution_bsr/checkpoints/last.ckpt/*
