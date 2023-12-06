@@ -1,4 +1,5 @@
 *.pth
+*.zip
 *.pt
 *.h5
 *.jpg

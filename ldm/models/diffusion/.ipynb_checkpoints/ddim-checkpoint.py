@@ -1,6 +1,6 @@
 """SAMPLING ONLY."""
 
-import torch
+import torch, os
 import numpy as np
 from tqdm import tqdm
 from functools import partial
@@ -8,7 +8,6 @@ from einops import rearrange
 
 from ldm.modules.diffusionmodules.util import make_ddim_sampling_parameters, make_ddim_timesteps, noise_like, extract_into_tensor
 from ldm.models.diffusion.sampling_util import renorm_thresholding, norm_thresholding, spatial_norm_thresholding
-
 
 class DDIMSampler(object):
     def __init__(self, model, schedule="linear", **kwargs):
@@ -150,20 +149,15 @@ class DDIMSampler(object):
         intermediates = {'x_inter': [img], 'pred_x0': [img]}
         time_range = reversed(range(0,timesteps)) if ddim_use_original_steps else np.flip(timesteps)
         total_steps = timesteps if ddim_use_original_steps else timesteps.shape[0]
-
-        ##### make attack_threshold ######
-        attack_threshold = total_steps * 0.4
-        print(f"|- Attack Threshold: {attack_threshold} / total_steps( {total_steps} )")
-        ##################################
+        
         
         print(f"Running DDIM Sampling with {total_steps} timesteps")
 
         iterator = tqdm(time_range, desc='DDIM Sampler', total=total_steps)
-        # print(cond)
-        # print(attacked_cond)
+        
         for i, step in enumerate(iterator):
             index = total_steps - i - 1
-            # print(index, attack_threshold)
+
             ts = torch.full((b,), step, device=device, dtype=torch.long)
 
             if mask is not None:
@@ -172,29 +166,13 @@ class DDIMSampler(object):
                 img = img_orig * mask + (1. - mask) * img
             assert (not (attacked_cond == cond).all())
             
-            # if index%10==0: print(index, attack_threshold)
-            
-            # if index%5 ==0:
-            #    print("Attack every few steps")
-            
-            if index> attack_threshold:
-                print(f"|- Attacking with attack threshold {attack_threshold}")
-                
-                outs = self.p_sample_ddim(img, attacked_cond, ts, index=index, use_original_steps=ddim_use_original_steps,
-                                          quantize_denoised=quantize_denoised, temperature=temperature,
-                                          noise_dropout=noise_dropout, score_corrector=score_corrector,
-                                          corrector_kwargs=corrector_kwargs,
-                                          unconditional_guidance_scale=unconditional_guidance_scale,
-                                          unconditional_conditioning=unconditional_conditioning,
-                                          dynamic_threshold=dynamic_threshold)
-            else:
-                outs = self.p_sample_ddim(img, cond, ts, index=index, use_original_steps=ddim_use_original_steps,
-                                      quantize_denoised=quantize_denoised, temperature=temperature,
-                                      noise_dropout=noise_dropout, score_corrector=score_corrector,
-                                      corrector_kwargs=corrector_kwargs,
-                                      unconditional_guidance_scale=unconditional_guidance_scale,
-                                      unconditional_conditioning=unconditional_conditioning,
-                                      dynamic_threshold=dynamic_threshold)
+            outs = self.p_sample_ddim(img, cond, attacked_cond, ts, index=index, use_original_steps=ddim_use_original_steps,
+                                                  quantize_denoised=quantize_denoised, temperature=temperature,
+                                                  noise_dropout=noise_dropout, score_corrector=score_corrector,
+                                                  corrector_kwargs=corrector_kwargs,
+                                                  unconditional_guidance_scale=unconditional_guidance_scale,
+                                                  unconditional_conditioning=unconditional_conditioning,
+                                                  dynamic_threshold=dynamic_threshold)
             img, pred_x0 = outs
             if callback: callback(i)
             if img_callback: img_callback(pred_x0, i)
@@ -206,32 +184,37 @@ class DDIMSampler(object):
         return img, intermediates
 
     @torch.no_grad()
-    def p_sample_ddim(self, x, c, t, index, repeat_noise=False, use_original_steps=False, quantize_denoised=False,
+    def p_sample_ddim(self, x, c, attacked_c, t, index, repeat_noise=False, use_original_steps=False, quantize_denoised=False,
                       temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None,
                       unconditional_guidance_scale=1., unconditional_conditioning=None,
                       dynamic_threshold=None):
         b, *_, device = *x.shape, x.device
 
         if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
-            e_t = self.model.apply_model(x, t, c)
+            e_t = self.model.apply_model(x, t, c, attacked_c)
         else:
-            x_in = torch.cat([x] * 2)
-            t_in = torch.cat([t] * 2)
-            if isinstance(c, dict):
-                assert isinstance(unconditional_conditioning, dict)
-                c_in = dict()
-                for k in c:
-                    if isinstance(c[k], list):
-                        c_in[k] = [torch.cat([
-                            unconditional_conditioning[k][i],
-                            c[k][i]]) for i in range(len(c[k]))]
-                    else:
-                        c_in[k] = torch.cat([
-                                unconditional_conditioning[k],
-                                c[k]])
-            else:
-                c_in = torch.cat([unconditional_conditioning, c])
-            e_t_uncond, e_t = self.model.apply_model(x_in, t_in, c_in).chunk(2)
+            def make_concat(x, c, t):
+                print("|- p_sample_ddim make_concat")
+                x_in = torch.cat([x] * 2)
+                t_in = torch.cat([t] * 2)
+                if isinstance(c, dict):
+                    assert isinstance(unconditional_conditioning, dict)
+                    c_in = dict()
+                    for k in c:
+                        if isinstance(c[k], list):
+                            c_in[k] = [torch.cat([
+                                unconditional_conditioning[k][i],
+                                c[k][i]]) for i in range(len(c[k]))]
+                        else:
+                            c_in[k] = torch.cat([
+                                    unconditional_conditioning[k],
+                                    c[k]])
+                else:
+                    c_in = torch.cat([unconditional_conditioning, c])
+                return c_in
+            clean_c_in = make_concat(x, c, t)
+            attacked_c_in = make_concat(x, attacked_c, t)
+            e_t_uncond, e_t = self.model.apply_model(x_in, t_in, c_in, attacked_c_in).chunk(2)
             e_t = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
 
         if score_corrector is not None:

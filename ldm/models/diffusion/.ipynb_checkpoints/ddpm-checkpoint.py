@@ -743,10 +743,9 @@ class LatentDiffusion(DDPM):
                     xc_before = xc.clone().detach().requires_grad_(True).to(self.device)
 
                     ################## Apply the PGD attack #################
-                    attack_model = load_attack_model()
+                    attack_model = load_attack_model() ## Inception - V3 
                     attack_pred = get_attack_predict(attack_model, xc_before)
                     attacked_xc = apply_attack(attack_model, xc_before, attack_pred)
-                    # torch.save(xc-xc_before, 'watermark.pt')
                     #########################################################
             else:
                 xc = x
@@ -911,16 +910,23 @@ class LatentDiffusion(DDPM):
 
         return [rescale_bbox(b) for b in bboxes]
 
-    def apply_model(self, x_noisy, t, cond, return_ids=False):
-
+    def apply_model(self, x_noisy, t, cond, attacked_cond, return_ids=False):
+        # print("|- ldm/models: Latent Diffusionn class: apply_model")
         if isinstance(cond, dict):
             # hybrid case, cond is exptected to be a dict
             pass
         else:
             if not isinstance(cond, list):
                 cond = [cond]
+                attacked_cond = [attacked_cond]
             key = 'c_concat' if self.model.conditioning_key == 'concat' else 'c_crossattn'
+            attacked_key = 'attacked_c_concat' if self.model.conditioning_key == 'concat' else 'c_crossattn'
+            # print(cond)
+            # print(attacked_cond)
+            assert not torch.equal(cond[0], attacked_cond[0])
+            # print("|- DDPM apply model in Latent Diffusion passed check cond != attacked_cond")
             cond = {key: cond}
+            attacked_cond = {attacked_key: attacked_cond}
 
         if hasattr(self, "split_input_params"):
             assert len(cond) == 1  # todo can only deal with one conditioning atm
@@ -939,15 +945,20 @@ class LatentDiffusion(DDPM):
 
             if self.cond_stage_key in ["image", "LR_image", "segmentation",
                                        'bbox_img'] and self.model.conditioning_key:  # todo check for completeness
-                c_key = next(iter(cond.keys()))  # get key
-                c = next(iter(cond.values()))  # get value
-                assert (len(c) == 1)  # todo extend to list with more than one elem
-                c = c[0]  # get element
+                def make_cond_list(cond):
+                    # print("|- ddpm Latent Diffusion make_cond_list")
+                    c_key = next(iter(cond.keys()))  # get key
+                    c = next(iter(cond.values()))  # get value
+                    assert (len(c) == 1)  # todo extend to list with more than one elem
+                    c = c[0]  # get element
 
-                c = unfold(c)
-                c = c.view((c.shape[0], -1, ks[0], ks[1], c.shape[-1]))  # (bn, nc, ks[0], ks[1], L )
+                    c = unfold(c)
+                    c = c.view((c.shape[0], -1, ks[0], ks[1], c.shape[-1]))  # (bn, nc, ks[0], ks[1], L )
 
-                cond_list = [{c_key: [c[:, :, :, :, i]]} for i in range(c.shape[-1])]
+                    cond_list = [{c_key: [c[:, :, :, :, i]]} for i in range(c.shape[-1])]
+                    return cond_list
+                cond_list = make_cond_list(cond)
+                attacked_cond_list = make_cond_list(attacked_cond)
 
             elif self.cond_stage_key == 'coordinates_bbox':
                 assert 'original_image_size' in self.split_input_params, 'BoudingBoxRescaling is missing original_image_size'
@@ -995,7 +1006,7 @@ class LatentDiffusion(DDPM):
                 cond_list = [cond for i in range(z.shape[-1])]  # Todo make this more efficient
 
             # apply model by loop over crops
-            output_list = [self.model(z_list[i], t, **cond_list[i]) for i in range(z.shape[-1])]
+            output_list = [self.model(z_list[i], t, **cond_list[i], **attacked_cond_list[i]) for i in range(z.shape[-1])]
             assert not isinstance(output_list[0],
                                   tuple)  # todo cant deal with multiple model outputs check this never happens
 
@@ -1455,12 +1466,18 @@ class DiffusionWrapper(pl.LightningModule):
         self.conditioning_key = conditioning_key
         assert self.conditioning_key in [None, 'concat', 'crossattn', 'hybrid', 'adm', 'hybrid-adm']
 
-    def forward(self, x, t, c_concat: list = None, c_crossattn: list = None, c_adm=None):
+    def forward(self, x, t, c_concat: list = None, attacked_c_concat: list = None, c_crossattn: list = None, c_adm=None):
         if self.conditioning_key is None:
             out = self.diffusion_model(x, t)
         elif self.conditioning_key == 'concat':
+            # print("|- PRINTING IN DiffusionWrapper")
+            # print(c_concat)
+            # print(attacked_c_concat)
+            assert not torch.equal(c_concat[0], attacked_c_concat[0])
+            # print("|- DiffusionWrapper Forward check passed, c_concat and attacked_c_concat are different")
             xc = torch.cat([x] + c_concat, dim=1)
-            out = self.diffusion_model(xc, t)
+            attacked_xc = torch.cat([x] + attacked_c_concat, dim=1)
+            out = self.diffusion_model(xc,attacked_xc, t)
         elif self.conditioning_key == 'crossattn':
             cc = torch.cat(c_crossattn, 1)
             out = self.diffusion_model(x, t, context=cc)

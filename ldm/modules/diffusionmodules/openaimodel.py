@@ -1,6 +1,6 @@
 from abc import abstractmethod
 from functools import partial
-import math
+import math, torch
 from typing import Iterable
 
 import numpy as np
@@ -20,6 +20,14 @@ from ldm.modules.diffusionmodules.util import (
 from ldm.modules.attention import SpatialTransformer
 from ldm.util import exists
 
+ratio = 1
+K = int(256* ratio)
+FIRST_PRINT=True
+DO_ATTACK=True
+if DO_ATTACK:
+    print(f"|- *** Attacking At Attention for top {K} attention scores")
+else:
+    print("**** NOT DOING ATTACK ATTENTION")
 
 # dummy replace
 def convert_module_to_f16(x):
@@ -78,12 +86,41 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     support it as an extra input.
     """
 
-    def forward(self, x, emb, context=None):
+    def forward(self, x, emb, context=None, attaceked = None):
         for layer in self:
             if isinstance(layer, TimestepBlock):
                 x = layer(x, emb)
             elif isinstance(layer, SpatialTransformer):
                 x = layer(x, context)
+            else:
+                x = layer(x)
+        return x
+    
+class TimestepEmbedSequential2(nn.Sequential, TimestepBlock):
+    """
+    A sequential module that passes timestep embeddings to the children that
+    support it as an extra input.
+    """
+
+    def forward(self, x, emb, context=None, attacked = None):
+        # print("Using TimestepEmbedSequential2")
+        for layer in self:
+            # print("Layer type in TimestepEmbedSequential2 :", type(layer).__name__) 
+            # print("|- isinstance(layer, ResBlock)? ", isinstance(layer, ResBlock))
+            if isinstance(layer, TimestepBlock):
+                if isinstance(layer, ResBlock):
+                    # print("|- ResBlock In TimestepBlock")
+                    (x,attacked) = layer(x, emb, attacked)
+                else:
+                    x = layer(x, emb)
+            elif isinstance(layer, SpatialTransformer):
+                x = layer(x, context)
+            elif isinstance(layer, ResBlock):
+                # print("|- ResBlock")
+                (x,attacked) = layer(x, attacked)
+            elif isinstance(layer, AttentionBlock):
+                # print("|- AttentionBlock")
+                x = layer(x,attacked)
             else:
                 x = layer(x)
         return x
@@ -241,7 +278,7 @@ class ResBlock(TimestepBlock):
         else:
             self.skip_connection = conv_nd(dims, channels, self.out_channels, 1)
 
-    def forward(self, x, emb):
+    def forward(self, x, emb, attacked=None):
         """
         Apply the block to a Tensor, conditioned on a timestep embedding.
         :param x: an [N x C x ...] Tensor of features.
@@ -249,31 +286,36 @@ class ResBlock(TimestepBlock):
         :return: an [N x C x ...] Tensor of outputs.
         """
         return checkpoint(
-            self._forward, (x, emb), self.parameters(), self.use_checkpoint
+            self._forward, (x, emb, attacked), self.parameters(), self.use_checkpoint
         )
 
 
-    def _forward(self, x, emb):
-        if self.updown:
-            in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1]
-            h = in_rest(x)
-            h = self.h_upd(h)
-            x = self.x_upd(x)
-            h = in_conv(h)
+    def _forward(self, x, emb, attacked_x=None):
+        def do_forward(x, emb):
+            if self.updown:
+                in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1]
+                h = in_rest(x)
+                h = self.h_upd(h)
+                x = self.x_upd(x)
+                h = in_conv(h)
+            else:
+                h = self.in_layers(x)
+            emb_out = self.emb_layers(emb).type(h.dtype)
+            while len(emb_out.shape) < len(h.shape):
+                emb_out = emb_out[..., None]
+            if self.use_scale_shift_norm:
+                out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
+                scale, shift = th.chunk(emb_out, 2, dim=1)
+                h = out_norm(h) * (1 + scale) + shift
+                h = out_rest(h)
+            else:
+                h = h + emb_out
+                h = self.out_layers(h)
+            return self.skip_connection(x) + h
+        if attacked_x is not None:
+            return (do_forward(x, emb), do_forward(attacked_x, emb))
         else:
-            h = self.in_layers(x)
-        emb_out = self.emb_layers(emb).type(h.dtype)
-        while len(emb_out.shape) < len(h.shape):
-            emb_out = emb_out[..., None]
-        if self.use_scale_shift_norm:
-            out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
-            scale, shift = th.chunk(emb_out, 2, dim=1)
-            h = out_norm(h) * (1 + scale) + shift
-            h = out_rest(h)
-        else:
-            h = h + emb_out
-            h = self.out_layers(h)
-        return self.skip_connection(x) + h
+            return do_forward(x, emb)
 
 
 class AttentionBlock(nn.Module):
@@ -312,17 +354,56 @@ class AttentionBlock(nn.Module):
 
         self.proj_out = zero_module(conv_nd(1, channels, channels, 1))
 
-    def forward(self, x):
-        return checkpoint(self._forward, (x,), self.parameters(), True)   # TODO: check checkpoint usage, is True # TODO: fix the .half call!!!
+    def forward(self, x, attacked_x=None):
+        return checkpoint(self._forward, (x, attacked_x), self.parameters(), True)   # TODO: check checkpoint usage, is True # TODO: fix the .half call!!!
         #return pt_checkpoint(self._forward, x)  # pytorch
 
-    def _forward(self, x):
-        b, c, *spatial = x.shape
-        x = x.reshape(b, c, -1)
-        qkv = self.qkv(self.norm(x))
-        h = self.attention(qkv)
-        h = self.proj_out(h)
-        return (x + h).reshape(b, c, *spatial)
+    def _forward(self, x, attacked_x):
+        global FIRST_PRINT
+        if attacked_x is not None:
+            if FIRST_PRINT:
+                print("|- Doing Attack at attention")
+                FIRST_PRINT=False
+            assert not torch.equal(x, attacked_x)
+        
+            b, c, *spatial = x.shape
+            x = x.reshape(b, c, -1)
+
+            # Compute QKV and attention scores
+            qkv = self.qkv(self.norm(x))
+            h = self.proj_out(self.attention(qkv))  # attention scores
+
+            # Reshape attention scores to match x dimensions
+            h = h.reshape(b, c, -1)
+            # Get top K attention scores and their indices
+            top_k_values, top_k_indices = torch.topk(h, K, dim=-1)
+
+            # Replace elements in x with those in attacked_x based on top K indices
+            # Ensure attacked_x is compatible
+            attacked_x = attacked_x.reshape(b, c, -1)
+            
+#             print(x.shape)
+#             print(attacked_x.shape)
+#             print(h.shape)
+            
+            for i in range(b):
+                x[i].view(-1)[top_k_indices[i]] = attacked_x[i].view(-1)[top_k_indices[i]]
+
+            x = x.reshape(b, c, *spatial)
+            h = h.reshape(b, c, *spatial)
+
+            out = x + h
+
+            return out
+        else:
+            b, c, *spatial = x.shape
+            x = x.reshape(b, c, -1)
+            qkv = self.qkv(self.norm(x))
+            h = self.attention(qkv)
+            h = self.proj_out(h)
+            return (x + h).reshape(b, c, *spatial)
+
+
 
 
 def count_flops_attn(model, _x, y):
@@ -622,7 +703,7 @@ class UNetModel(nn.Module):
         if legacy:
             #num_heads = 1
             dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
-        self.middle_block = TimestepEmbedSequential(
+        self.middle_block = TimestepEmbedSequential2(
             ResBlock(
                 ch,
                 time_embed_dim,
@@ -742,7 +823,7 @@ class UNetModel(nn.Module):
         self.middle_block.apply(convert_module_to_f32)
         self.output_blocks.apply(convert_module_to_f32)
 
-    def forward(self, x, timesteps=None, context=None, y=None,**kwargs):
+    def forward(self, x, attacked_x, timesteps=None, context=None, y=None,**kwargs):
         """
         Apply the model to an input batch.
         :param x: an [N x C x ...] Tensor of inputs.
@@ -766,7 +847,18 @@ class UNetModel(nn.Module):
         for module in self.input_blocks:
             h = module(h, emb, context)
             hs.append(h)
-        h = self.middle_block(h, emb, context)
+            
+        ### For attacked x ###
+        if DO_ATTACK:
+            attacked_h = attacked_x.type(self.dtype)
+            for module in self.input_blocks: ## input_blocks is a TimestepEmbedSequential instance
+                attacked_h = module(attacked_h, emb, context)
+                # hs.append(attacked_h)
+            
+            h = self.middle_block(h, emb, context, attacked = attacked_h)
+        else:
+            h = self.middle_block(h, emb, context,)
+            
         for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)
             h = module(h, emb, context)

@@ -29,11 +29,11 @@ for im in cond_choice:
     
     # Save the resized image
     im_name = im.split('.')[0]
-    storing_name = './attacked_imgs/'+im_name + "_attacked-ratio3-0.4.jpg"
+    storing_name = './attacked_imgs/'+im_name + "_attacked.jpg"
 
     #################################
     
-    print("|- Running: ", storing_name)
+    print(f"|- Running img: {im_name} with storing name {storing_name}")
     cond_choice_path = os.path.join(dir_, im)    
     
     logs = run(model["model"], cond_choice_path, mode, custom_steps)
