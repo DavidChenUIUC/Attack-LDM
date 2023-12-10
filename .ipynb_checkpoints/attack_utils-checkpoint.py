@@ -9,10 +9,10 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 @torch.enable_grad()
 def apply_attack(model, images, labels):
-    ratio = 4
+    ratio = 1
     # atk = PGD(model, eps=8/255, alpha=2/225, steps=10, random_start=True)
     atk1 = torchattacks.FGSM(model, eps=(8/255* ratio))
-    atk2 = torchattacks.PGD(model, eps=(8/255 * ratio), alpha=(2/255*ratio), steps=40*ratio, random_start=True)
+    atk2 = torchattacks.PGD(model, eps=(8/255 * ratio), alpha=(2/255*ratio), steps=10*ratio, random_start=True)
     
     
     atk3 = torchattacks.CW(model, c=0.1, steps=1000, lr=0.01)

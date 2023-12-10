@@ -172,10 +172,10 @@ class DDIMSampler(object):
                 img = img_orig * mask + (1. - mask) * img
             assert (not (attacked_cond == cond).all())
             
-            # if index%10==0: print(index, attack_threshold)
+#             if index%10==0: print(index, attack_threshold)
             
-            # if index%5 ==0:
-            #    print("Attack every few steps")
+#             if index%5 ==0:
+#                print("Attack every few steps")
             
             if index> attack_threshold:
                 print(f"|- Attacking with attack threshold {attack_threshold}")

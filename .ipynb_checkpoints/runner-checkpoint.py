@@ -17,26 +17,12 @@ mode= 'superresolution'
 model = get_model(mode)
 
 custom_steps = 100
-dir_ = './data/example_conditioning/superresolution'
-cond_choice = os.listdir(dir_)
+attackldm_path = "/home/cwtang/deepmind-research/adversarial_robustness/pytorch/"
 
-for im in cond_choice:
-    if "jpg" not in im and "png" not in im and "jpeg" not in im: continue
-
-    if 'img1' in im or 'celeba' in im : pass
-    else: continue
-    
-    
-    # Save the resized image
-    im_name = im.split('.')[0]
-    storing_name = './attacked_imgs/'+im_name + "_attacked-ratio3-0.4.jpg"
-
-    #################################
-    
-    print("|- Running: ", storing_name)
-    cond_choice_path = os.path.join(dir_, im)    
-    
-    logs = run(model["model"], cond_choice_path, mode, custom_steps)
+def runner(image_idx):
+    print("|- Runner")
+    image_path = os.path.join(attackldm_path, "tmp_cifar10/image{}.jpg".format(image_idx))
+    logs = run(model["model"], image_path, mode, custom_steps)
     
     # Process the output
     sample = logs["sample"]
@@ -50,11 +36,15 @@ for im in cond_choice:
     processed_image = Image.fromarray(sample[0])
 
     # Read original image to get its dimensions
-    original_image = Image.open(cond_choice_path)
+    original_image = Image.open(image_path)
     orig_width, orig_height = original_image.size
 
     # Resize the processed image to original dimensions
     resized_image = processed_image.resize((orig_width, orig_height),)
 
-    
-    resized_image.save(storing_name)
+    resized_image.save(os.path.join(attackldm_path, "cifar10_after_runner/image{}.jpg".format(image_idx))) 
+    print("|- Runner done")
+
+if __name__ == '__main__':
+    image_idx = sys.argv[1]
+    runner(int(image_idx))
